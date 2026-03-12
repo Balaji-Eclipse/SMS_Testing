@@ -1,18 +1,10 @@
-// Only load .env locally — on Render, env vars are set in the dashboard
-if (process.env.NODE_ENV !== "production") {
-  require("dotenv").config();
-}
-
+if (process.env.NODE_ENV !== "production") { require("dotenv").config(); }
 const express = require("express");
 const twilio  = require("twilio");
 const path    = require("path");
-
-const app  = express();
-
-// ── CRITICAL FOR RENDER: listen on 0.0.0.0, Render injects PORT ──────────────
-const PORT = process.env.PORT || 3000;
-const HOST = "0.0.0.0";
-
+const app     = express();
+const PORT    = process.env.PORT || 3000;
+const HOST    = "0.0.0.0";
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 app.use(express.static(path.join(__dirname, "public")));
@@ -20,38 +12,30 @@ app.use(express.static(path.join(__dirname, "public")));
 const accountSid = process.env.TWILIO_ACCOUNT_SID;
 const authToken  = process.env.TWILIO_AUTH_TOKEN;
 const fromNumber = process.env.TWILIO_FROM_NUMBER;
-
 if (!accountSid || !authToken || !fromNumber) {
-  console.error("ERROR: Missing Twilio credentials!");
-  console.error("On Render → Dashboard → Environment → add:");
-  console.error("  TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER");
-  process.exit(1);
+  console.error("ERROR: Missing Twilio credentials!"); process.exit(1);
 }
-
 const client = twilio(accountSid, authToken);
-
-// ── Scheduled messages (in-memory) ───────────────────────────────────────────
 const scheduled = [];
 
-// ── Keep-alive ping (Render free tier spins down after 15 min idle) ───────────
-// Render sets RENDER_EXTERNAL_URL automatically on all web services
+// Keep-alive for Render free tier
 const RENDER_URL = process.env.RENDER_EXTERNAL_URL;
 if (RENDER_URL) {
   const https = require("https");
-  setInterval(() => {
-    https.get(RENDER_URL + "/health", res => {
-      console.log("[KEEPALIVE] /health →", res.statusCode);
-    }).on("error", e => console.warn("[KEEPALIVE] fail:", e.message));
-  }, 14 * 60 * 1000);
-  console.log("[KEEPALIVE] Active — pinging every 14 min");
+  setInterval(() => https.get(RENDER_URL + "/health", ()=>{}).on("error", ()=>{}), 14*60*1000);
 }
 
-// ── GET /config ───────────────────────────────────────────────────────────────
-app.get("/config", (req, res) => {
-  res.json({ fromNumber });
-});
+function pick(m) {
+  return { sid: m.sid, body: m.body, from: m.from, to: m.to, status: m.status,
+    direction: m.direction, numSegments: m.numSegments, price: m.price, priceUnit: m.priceUnit,
+    dateSent: m.dateSent, dateCreated: m.dateCreated, dateUpdated: m.dateUpdated,
+    errorCode: m.errorCode, errorMessage: m.errorMessage };
+}
 
-// ── POST /send ────────────────────────────────────────────────────────────────
+// ── CONFIG ────────────────────────────────────────────────────────────────────
+app.get("/config", (req, res) => res.json({ fromNumber }));
+
+// ── SEND SMS ──────────────────────────────────────────────────────────────────
 app.post("/send", async (req, res) => {
   const { to, body } = req.body;
   if (!to || !body) return res.status(400).json({ success: false, error: "Missing to or body" });
@@ -66,167 +50,161 @@ app.post("/send", async (req, res) => {
   }
 });
 
-// ── GET /receive?to=+1xxx&limit=100 ──────────────────────────────────────────
-app.get("/receive", async (req, res) => {
-  const { to: filterFrom, limit = 100 } = req.query;
-  try {
-    const msgs = await client.messages.list({ to: fromNumber, limit: parseInt(limit) });
-    const result = msgs
-      .filter(m => m.direction === "inbound" && (!filterFrom || m.from === filterFrom))
-      .map(m => ({
-        sid: m.sid, body: m.body, from: m.from, to: m.to,
-        direction: m.direction, status: m.status,
-        numSegments: m.numSegments, price: m.price, priceUnit: m.priceUnit,
-        dateSent: m.dateSent, dateCreated: m.dateCreated, dateUpdated: m.dateUpdated
-      }));
-    res.json({ success: true, messages: result, total: result.length });
-  } catch (err) {
-    res.status(400).json({ success: false, error: err.message, code: err.code });
-  }
-});
-
-// ── GET /history?to=+1xxx&limit=100 ──────────────────────────────────────────
+// ── HISTORY (sorted ascending — fixes order mismatch) ─────────────────────────
 app.get("/history", async (req, res) => {
-  const { to: contact, limit = 100 } = req.query;
-  if (!contact) return res.status(400).json({ success: false, error: "Missing to param" });
+  const { to: contact, limit = 200 } = req.query;
+  if (!contact) return res.status(400).json({ success: false, error: "Missing to" });
   try {
-    const [outbound, inbound] = await Promise.all([
+    const [out, inb] = await Promise.all([
       client.messages.list({ from: fromNumber, to: contact, limit: parseInt(limit) }),
       client.messages.list({ to: fromNumber, from: contact, limit: parseInt(limit) })
     ]);
     const all = [
-      ...outbound.map(m => ({ ...pick(m), direction: "outbound" })),
-      ...inbound.map(m => ({ ...pick(m), direction: "inbound" }))
+      ...out.map(m => ({ ...pick(m), direction: "outbound" })),
+      ...inb.map(m => ({ ...pick(m), direction: "inbound" }))
     ].sort((a, b) => new Date(a.dateCreated) - new Date(b.dateCreated));
     res.json({ success: true, messages: all, total: all.length });
-  } catch (err) {
-    res.status(400).json({ success: false, error: err.message, code: err.code });
-  }
+  } catch (err) { res.status(400).json({ success: false, error: err.message }); }
 });
 
-function pick(m) {
-  return {
-    sid: m.sid, body: m.body, from: m.from, to: m.to,
-    status: m.status, numSegments: m.numSegments,
-    price: m.price, priceUnit: m.priceUnit,
-    dateSent: m.dateSent, dateCreated: m.dateCreated,
-    errorCode: m.errorCode, errorMessage: m.errorMessage
-  };
-}
-
-// ── GET /status/:sid ──────────────────────────────────────────────────────────
+// ── MESSAGE STATUS ─────────────────────────────────────────────────────────────
 app.get("/status/:sid", async (req, res) => {
   try {
     const m = await client.messages(req.params.sid).fetch();
-    res.json({ success: true, sid: m.sid, status: m.status,
-      errorCode: m.errorCode, errorMessage: m.errorMessage,
-      price: m.price, priceUnit: m.priceUnit, numSegments: m.numSegments });
-  } catch (err) {
-    res.status(400).json({ success: false, error: err.message, code: err.code });
-  }
+    res.json({ success: true, sid: m.sid, status: m.status, errorCode: m.errorCode,
+      price: m.price, numSegments: m.numSegments });
+  } catch (err) { res.status(400).json({ success: false, error: err.message }); }
 });
 
-// ── DELETE /messages/:sid ─────────────────────────────────────────────────────
+// ── DELETE ONE MESSAGE ─────────────────────────────────────────────────────────
 app.delete("/messages/:sid", async (req, res) => {
   console.log("[DELETE] SID:", req.params.sid);
-  try {
-    await client.messages(req.params.sid).remove();
-    res.json({ success: true, sid: req.params.sid });
-  } catch (err) {
-    res.status(400).json({ success: false, error: err.message, code: err.code });
-  }
+  try { await client.messages(req.params.sid).remove(); res.json({ success: true }); }
+  catch (err) { res.status(400).json({ success: false, error: err.message }); }
 });
 
-// ── POST /redact/:sid ─────────────────────────────────────────────────────────
+// ── REDACT MESSAGE BODY ────────────────────────────────────────────────────────
 app.post("/redact/:sid", async (req, res) => {
-  console.log("[REDACT] SID:", req.params.sid);
-  try {
-    await client.messages(req.params.sid).update({ body: "" });
-    res.json({ success: true, sid: req.params.sid });
-  } catch (err) {
-    res.status(400).json({ success: false, error: err.message, code: err.code });
-  }
+  try { await client.messages(req.params.sid).update({ body: "" }); res.json({ success: true }); }
+  catch (err) { res.status(400).json({ success: false, error: err.message }); }
 });
 
-// ── POST /schedule ────────────────────────────────────────────────────────────
+// ── CLEAR ALL FOR ONE CONTACT ─────────────────────────────────────────────────
+app.delete("/messages/contact/:number", async (req, res) => {
+  const contact = decodeURIComponent(req.params.number);
+  console.log("[CLEAR CONTACT]", contact);
+  try {
+    const [out, inb] = await Promise.all([
+      client.messages.list({ from: fromNumber, to: contact, limit: 1000 }),
+      client.messages.list({ to: fromNumber, from: contact, limit: 1000 })
+    ]);
+    let deleted = 0, failed = 0;
+    await Promise.allSettled([...out, ...inb].map(async m => {
+      try { await client.messages(m.sid).remove(); deleted++; }
+      catch (e) { failed++; }
+    }));
+    res.json({ success: true, deleted, failed });
+  } catch (err) { res.status(400).json({ success: false, error: err.message }); }
+});
+
+// ── CLEAR ALL MESSAGES (entire account) ──────────────────────────────────────
+app.delete("/messages/clearall", async (req, res) => {
+  console.log("[CLEAR ALL]");
+  try {
+    const [out, inb] = await Promise.all([
+      client.messages.list({ from: fromNumber, limit: 1000 }),
+      client.messages.list({ to: fromNumber, limit: 1000 })
+    ]);
+    const seen = new Set();
+    const all = [...out, ...inb].filter(m => { if (seen.has(m.sid)) return false; seen.add(m.sid); return true; });
+    let deleted = 0, failed = 0;
+    await Promise.allSettled(all.map(async m => {
+      try { await client.messages(m.sid).remove(); deleted++; }
+      catch (e) { failed++; }
+    }));
+    res.json({ success: true, deleted, failed, total: all.length });
+  } catch (err) { res.status(400).json({ success: false, error: err.message }); }
+});
+
+// ── SCHEDULE ──────────────────────────────────────────────────────────────────
 app.post("/schedule", (req, res) => {
   const { to, body, sendAt } = req.body;
-  if (!to || !body || !sendAt) return res.status(400).json({ success: false, error: "Missing to/body/sendAt" });
+  if (!to || !body || !sendAt) return res.status(400).json({ success: false, error: "Missing fields" });
   const delay = new Date(sendAt) - Date.now();
-  if (delay < 1000) return res.status(400).json({ success: false, error: "sendAt must be in the future" });
+  if (delay < 1000) return res.status(400).json({ success: false, error: "Must be in the future" });
   const id = "sch_" + Date.now();
   const job = { id, to, body, sendAt, status: "pending", sid: null };
-  const timerId = setTimeout(async () => {
-    try {
-      const msg = await client.messages.create({ from: fromNumber, to, body });
-      job.status = "sent"; job.sid = msg.sid;
-      console.log("[SCHED] Sent SID=" + msg.sid);
-    } catch (err) {
-      job.status = "failed"; job.error = err.message;
-      console.error("[SCHED] FAILED:", err.message);
-    }
+  job.timerId = setTimeout(async () => {
+    try { const msg = await client.messages.create({ from: fromNumber, to, body }); job.status = "sent"; job.sid = msg.sid; }
+    catch (err) { job.status = "failed"; job.error = err.message; }
   }, delay);
-  job.timerId = timerId;
   scheduled.push(job);
-  console.log("[SCHED] Queued id=" + id + " in " + Math.round(delay/1000) + "s");
+  console.log("[SCHED] id=" + id + " delay=" + Math.round(delay/1000) + "s");
   res.json({ success: true, id, sendAt, to });
 });
 
-// ── GET /schedule ─────────────────────────────────────────────────────────────
-app.get("/schedule", (req, res) => {
-  res.json({ success: true, scheduled: scheduled.map(({ id, to, body, sendAt, status, sid }) => ({ id, to, body, sendAt, status, sid })) });
-});
+app.get("/schedule", (req, res) => res.json({
+  success: true,
+  scheduled: scheduled.map(({ id, to, body, sendAt, status, sid }) => ({ id, to, body, sendAt, status, sid }))
+}));
 
-// ── DELETE /schedule/:id ──────────────────────────────────────────────────────
 app.delete("/schedule/:id", (req, res) => {
   const idx = scheduled.findIndex(s => s.id === req.params.id);
   if (idx === -1) return res.status(404).json({ success: false, error: "Not found" });
   const job = scheduled[idx];
   if (job.status !== "pending") return res.status(400).json({ success: false, error: "Already " + job.status });
-  clearTimeout(job.timerId);
-  scheduled.splice(idx, 1);
-  res.json({ success: true, id: req.params.id });
+  clearTimeout(job.timerId); scheduled.splice(idx, 1);
+  res.json({ success: true });
 });
 
-// ── GET /stats ────────────────────────────────────────────────────────────────
+// ── STATS ─────────────────────────────────────────────────────────────────────
 app.get("/stats", async (req, res) => {
   const { to: contact } = req.query;
   try {
-    const params = contact
-      ? [client.messages.list({ from: fromNumber, to: contact, limit: 200 }),
-         client.messages.list({ to: fromNumber, from: contact, limit: 200 })]
-      : [client.messages.list({ from: fromNumber, limit: 200 }),
-         client.messages.list({ to: fromNumber, limit: 200 })];
-    const [outbound, inbound] = await Promise.all(params);
-    const all = [...outbound, ...inbound];
-    let totalCost = 0, totalSegs = 0;
-    const statuses = {};
+    const [out, inb] = await Promise.all(contact
+      ? [client.messages.list({ from: fromNumber, to: contact, limit: 500 }),
+         client.messages.list({ to: fromNumber, from: contact, limit: 500 })]
+      : [client.messages.list({ from: fromNumber, limit: 500 }),
+         client.messages.list({ to: fromNumber, limit: 500 })]);
+    const all = [...out, ...inb];
+    let totalCost = 0, totalSegs = 0; const statuses = {};
     all.forEach(m => {
       if (m.price) totalCost += Math.abs(parseFloat(m.price));
       if (m.numSegments) totalSegs += parseInt(m.numSegments);
       statuses[m.status] = (statuses[m.status] || 0) + 1;
     });
-    res.json({ success: true, total: all.length, sent: outbound.length, received: inbound.length,
+    res.json({ success: true, total: all.length, sent: out.length, received: inb.length,
       totalCostUSD: totalCost.toFixed(4), totalSegments: totalSegs, statuses });
-  } catch (err) {
-    res.status(400).json({ success: false, error: err.message, code: err.code });
-  }
+  } catch (err) { res.status(400).json({ success: false, error: err.message }); }
 });
 
-// ── GET /health ───────────────────────────────────────────────────────────────
-app.get("/health", (req, res) => {
-  res.json({ status: "ok", from: fromNumber, time: new Date().toISOString(),
-    env: process.env.NODE_ENV || "development",
-    scheduledCount: scheduled.filter(s => s.status === "pending").length });
+// ── ACCOUNT DASHBOARD ─────────────────────────────────────────────────────────
+app.get("/dashboard", async (req, res) => {
+  try {
+    const [account, numbers] = await Promise.all([
+      client.api.accounts(accountSid).fetch(),
+      client.incomingPhoneNumbers.list({ limit: 20 })
+    ]);
+    res.json({ success: true,
+      account: { name: account.friendlyName, status: account.status, type: account.type },
+      numbers: numbers.map(n => ({ number: n.phoneNumber, friendly: n.friendlyName,
+        sms: n.capabilities.sms, voice: n.capabilities.voice, mms: n.capabilities.mms }))
+    });
+  } catch (err) { res.status(400).json({ success: false, error: err.message }); }
 });
 
-// ── Listen on 0.0.0.0 (REQUIRED by Render) ───────────────────────────────────
+// ── HEALTH ────────────────────────────────────────────────────────────────────
+app.get("/health", (req, res) => res.json({
+  status: "ok", from: fromNumber, time: new Date().toISOString(),
+  scheduled: scheduled.filter(s => s.status === "pending").length
+}));
+
+// ── START ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, HOST, () => {
   console.log("═══════════════════════════════════════════════════");
-  console.log("  NOVA SMS");
-  console.log("  Listening: " + HOST + ":" + PORT);
-  console.log("  From:      " + fromNumber);
-  console.log("  Env:       " + (process.env.NODE_ENV || "development"));
-  if (RENDER_URL) console.log("  Public:    " + RENDER_URL);
+  console.log("  Twilio SMS  ·  Ultimate Edition");
+  console.log("  Listening : " + HOST + ":" + PORT);
+  console.log("  From      : " + fromNumber);
+  if (RENDER_URL) console.log("  Public    : " + RENDER_URL);
   console.log("═══════════════════════════════════════════════════");
 });
