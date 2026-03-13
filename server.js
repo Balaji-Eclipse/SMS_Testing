@@ -12,11 +12,21 @@ app.use(express.static(path.join(__dirname, "public")));
 const accountSid = process.env.TWILIO_ACCOUNT_SID;
 const authToken  = process.env.TWILIO_AUTH_TOKEN;
 const fromNumber = process.env.TWILIO_FROM_NUMBER;
+const whatsappFrom = process.env.TWILIO_WHATSAPP_FROM; // optional
 if (!accountSid || !authToken || !fromNumber) {
   console.error("ERROR: Missing Twilio credentials!"); process.exit(1);
 }
 const client = twilio(accountSid, authToken);
 const scheduled = [];
+
+// Server-Sent Events (SSE) clients for real-time inbound updates
+const sseClients = new Set();
+function broadcastSSE(data){
+  const payload = `data: ${JSON.stringify(data)}\n\n`;
+  for(const res of sseClients){
+    try{res.write(payload);}catch(_){sseClients.delete(res);}    
+  }
+}
 
 // Keep-alive for Render free tier
 const RENDER_URL = process.env.RENDER_EXTERNAL_URL;
@@ -28,22 +38,70 @@ if (RENDER_URL) {
 function pick(m) {
   return { sid: m.sid, body: m.body, from: m.from, to: m.to, status: m.status,
     direction: m.direction, numSegments: m.numSegments, price: m.price, priceUnit: m.priceUnit,
-    dateSent: m.dateSent, dateCreated: m.dateCreated, dateUpdated: m.dateUpdated,
+    dateCreated: m.dateCreated, dateSent: m.dateSent, dateUpdated: m.dateUpdated,
     errorCode: m.errorCode, errorMessage: m.errorMessage };
 }
 
 // ── CONFIG ────────────────────────────────────────────────────────────────────
-app.get("/config", (req, res) => res.json({ fromNumber }));
+app.get("/config", (req, res) => res.json({
+  fromNumber,
+  whatsappEnabled: !!whatsappFrom,
+  whatsappFrom: whatsappFrom || null,
+}));
+
+// ── REAL-TIME INBOUND (Server-Sent Events) ───────────────────────────────────
+app.get("/events", (req, res) => {
+  res.set({
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+  });
+  res.flushHeaders();
+  res.write("retry: 10000\n\n");
+  sseClients.add(res);
+  req.on("close", () => sseClients.delete(res));
+});
+
+// ── TWILIO INCOMING WEBHOOK (called by Twilio when a new message arrives) ───
+app.post("/incoming", (req, res) => {
+  const from = req.body.From || req.body.from;
+  const to = req.body.To || req.body.to;
+  const body = req.body.Body || req.body.body || "";
+  const sid = req.body.MessageSid || req.body.messageSid || null;
+  if (!from || !to) return res.status(400).send("Missing From/To");
+
+  // Broadcast to all connected clients
+  broadcastSSE({
+    type: "incoming",
+    from,
+    to,
+    body,
+    sid,
+    timestamp: new Date().toISOString(),
+  });
+
+  // Twilio expects a 200 response (can return empty TwiML)
+  res.send("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response></Response>");
+});
 
 // ── SEND SMS ──────────────────────────────────────────────────────────────────
 app.post("/send", async (req, res) => {
-  const { to, body } = req.body;
+  const { to, body, channel = "sms" } = req.body;
   if (!to || !body) return res.status(400).json({ success: false, error: "Missing to or body" });
-  console.log("[SEND] To:", to, "Body:", body.substring(0, 60));
+  console.log("[SEND] To:", to, "Channel:", channel, "Body:", body.substring(0, 60));
+
+  let from = fromNumber;
+  let dest = to;
+  if (channel === "whatsapp") {
+    if (!whatsappFrom) return res.status(400).json({ success: false, error: "WhatsApp not configured on server" });
+    from = `whatsapp:${whatsappFrom}`;
+    dest = `whatsapp:${to.replace(/^whatsapp:/, "")}`;
+  }
+
   try {
-    const msg = await client.messages.create({ from: fromNumber, to, body });
+    const msg = await client.messages.create({ from, to: dest, body });
     console.log("[SEND] OK SID=" + msg.sid);
-    res.json({ success: true, sid: msg.sid, status: msg.status });
+    res.json({ success: true, sid: msg.sid, status: msg.status, channel });
   } catch (err) {
     console.error("[SEND] ERR", err.code, err.message);
     res.status(400).json({ success: false, error: err.message, code: err.code });
@@ -72,7 +130,7 @@ app.get("/status/:sid", async (req, res) => {
   try {
     const m = await client.messages(req.params.sid).fetch();
     res.json({ success: true, sid: m.sid, status: m.status, errorCode: m.errorCode,
-      price: m.price, numSegments: m.numSegments });
+      price: m.price, numSegments: m.numSegments, dateCreated: m.dateCreated, dateSent: m.dateSent });
   } catch (err) { res.status(400).json({ success: false, error: err.message }); }
 });
 
@@ -202,7 +260,7 @@ app.get("/health", (req, res) => res.json({
 // ── START ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, HOST, () => {
   console.log("═══════════════════════════════════════════════════");
-  console.log("  Twilio SMS  ·  Ultimate Edition");
+  console.log("  SMS Master  ·  Advanced Edition");
   console.log("  Listening : " + HOST + ":" + PORT);
   console.log("  From      : " + fromNumber);
   if (RENDER_URL) console.log("  Public    : " + RENDER_URL);
