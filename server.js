@@ -3,7 +3,7 @@ if (process.env.NODE_ENV !== "production") { require("dotenv").config(); }
 // ── SSL fix for corporate networks (dev only)
 if (process.env.NODE_ENV !== "production") {
   process.env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0";
-  console.warn("⚠️  TLS verification bypassed (dev mode)");
+  //console.warn("⚠️  TLS verification bypassed (dev mode)");
 }
 if (process.env.NODE_ENV === "production" && process.env.NODE_TLS_REJECT_UNAUTHORIZED === "0") {
   console.error("FATAL: TLS verification must not be disabled in production."); process.exit(1);
@@ -234,7 +234,7 @@ app.get("/events", (req, res) => {
 function validateTwilioSignature(req, res, next) {
   // Skip verification in dev mode (can be disabled with env var)
   if (process.env.SKIP_WEBHOOK_VERIFICATION === "true") {
-    console.warn("⚠️  Webhook signature verification disabled (dev only)");
+   // console.warn("⚠️  Webhook signature verification disabled (dev only)");
     return next();
   }
   
@@ -523,7 +523,7 @@ app.use((err, req, res, _next) => {
 
 app.listen(PORT, HOST, () => {
   console.log("════════════════════════════════════════════════════");
-  console.log("  SMS Master v2.1 — Improved Edition");
+  console.log("  virtual SMS v2.1 — Improved Edition");
   console.log("  Listening  : " + HOST + ":" + PORT);
   console.log("  From       : " + fromNumber);
   console.log("  Contacts   : " + Object.keys(serverContacts).length + " saved");
